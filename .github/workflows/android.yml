@@ -1,42 +1,149 @@
 name: Android APK
+
+# Rev 2 — 14 Sep 2026
+#
+# Rev 1 failed at the "Build APK" step after 5m45s. Everything before it passed:
+# npm ci, type check, 71 engine tests, the T2 adaptive simulation and the native
+# prebuild all went green. So the JavaScript side of this project is sound and
+# the failure is in the Android toolchain alone.
+#
+# Two changes, and one that matters more than either.
+#
+# 1. THE NDK. Expo SDK 57's root-project plugin pins ndkVersion 27.1.12297006,
+#    and app/build.gradle applies it unconditionally. This app really does need
+#    it: reanimated 4, react-native-worklets, gesture-handler and screens all
+#    compile C++ through CMake. android-actions/setup-android installs the
+#    command-line tools, a platform and build-tools — it does NOT install the
+#    NDK. Gradle therefore reaches configuration, cannot resolve the pinned NDK
+#    and stops. That is exactly the shape of a 5m45s failure: long enough to
+#    download Gradle 9.3.1 and compile the included build plugins, far too
+#    short to have compiled a line of native code.
+#
+# 2. ONE ARCHITECTURE. The template builds four ABIs. A Pixel is arm64-v8a, so
+#    the other three are dead weight — and native compilation is the long pole
+#    in this build. Building one ABI is roughly a quarter of the work.
+#
+# 3. THE LOG COMES BACK TO US. Every previous cycle ended with me guessing at a
+#    failure I could not read. Gradle's output is now teed to a file, the tail
+#    is written into the job summary — which is readable on the public run page
+#    without signing in — and the whole log is uploaded as an artifact. Win or
+#    lose, the next move is made from evidence.
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: apps/mobile
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: android-actions/setup-android@v3
+
+      # ------------------------------------------------------------------ SDK
+      - name: Install the NDK and CMake
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install \
+            "platform-tools" \
+            "ndk;27.1.12297006" \
+            "cmake;3.22.1" \
+            > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - name: Record the toolchain
+        run: |
+          {
+            echo '## Toolchain'
+            echo '```'
+            java -version 2>&1
+            echo "node   $(node -v)"
+            echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+            ls "$ANDROID_SDK_ROOT/ndk" 2>&1 || echo 'no ndk directory'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------- JavaScript side
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
+
       - name: Type check
         run: npx tsc --noEmit
+
       - name: Engine tests
         working-directory: packages/engine
         run: node --experimental-strip-types --no-warnings --test test/*.test.ts
+
       - name: Adaptive engine simulation
         working-directory: packages/engine
         run: node --experimental-strip-types --no-warnings sim/harness.ts
+
       - name: Generate native project
         run: npx expo prebuild --platform android --no-install
+
+      # -------------------------------------------------------------- the APK
       - name: Build APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
         working-directory: apps/mobile/android
-      - uses: actions/upload-artifact@v4
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            -PreactNativeArchitectures=arm64-v8a \
+            -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g" \
+            2>&1 | tee "$GITHUB_WORKSPACE/gradle.log"
+
+      # The part that ends the guessing. Runs whether Gradle won or lost.
+      - name: Report what Gradle said
         if: always()
+        working-directory: .
+        run: |
+          if [ ! -f gradle.log ]; then
+            echo 'Gradle produced no log — it did not start.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo '## Gradle — last 200 lines'
+            echo '```'
+            tail -n 200 gradle.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '## Every line containing an error'
+            echo '```'
+            grep -nE "FAILURE|error:|ERROR|Caused by|What went wrong|Could not|Cannot|not found|No version" gradle.log | tail -n 80 || echo 'none'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the full Gradle log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-log
+          path: gradle.log
+          if-no-files-found: ignore
+
+      - name: Upload the APK
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
           name: mettle-apk
           path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
