@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "Mettle",
+    "slug": "mettle",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "mettle",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "backgroundColor": "#10151A",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#10151A"
+    },
+    "android": {
+      "package": "io.tribeconnect.mettle",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "backgroundColor": "#10151A"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "io.tribeconnect.mettle",
+      "supportsTablet": false
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "4e73c753-5067-42bd-b011-e0b1abe1b436"
+      }
+    }
+  }
+}

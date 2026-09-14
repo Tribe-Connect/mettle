@@ -1,0 +1,13 @@
+{
+  "name": "@mettle/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mettle adaptive, measurement and scheduling engines. Pure TypeScript, no UI, no platform dependency.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "sim": "node --experimental-strip-types --no-warnings sim/harness.ts"
+  },
+  "engines": { "node": ">=22.13.0" }
+}
