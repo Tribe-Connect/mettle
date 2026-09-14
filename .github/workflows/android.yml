@@ -1,38 +1,31 @@
 name: Android APK
 
-# Rev 2 — 14 Sep 2026
+# Rev 3 — 14 Sep 2026
 #
-# Rev 1 failed at the "Build APK" step after 5m45s. Everything before it passed:
-# npm ci, type check, 71 engine tests, the T2 adaptive simulation and the native
-# prebuild all went green. So the JavaScript side of this project is sound and
-# the failure is in the Android toolchain alone.
+# Rev 2 built successfully, and the artifact was still not usable. `assembleDebug`
+# produces an APK with NO JavaScript inside it: a debug build expects to fetch the
+# bundle from a Metro dev server on a laptop over the local network. Installed on
+# a phone with nothing serving it, it opens to "Unable to load script". The build
+# was green and the deliverable was inert — which is a reminder that "CI passed"
+# and "the thing works" are different claims.
 #
-# Two changes, and one that matters more than either.
+# So this builds RELEASE, which embeds the Hermes bytecode in the APK. It installs
+# and runs standalone, no laptop involved. The Expo template signs release with the
+# debug keystore (app/build.gradle:115), so no key management is needed yet — that
+# changes before anything reaches a store, but it is correct for a pilot build.
 #
-# 1. THE NDK. Expo SDK 57's root-project plugin pins ndkVersion 27.1.12297006,
-#    and app/build.gradle applies it unconditionally. This app really does need
-#    it: reanimated 4, react-native-worklets, gesture-handler and screens all
-#    compile C++ through CMake. android-actions/setup-android installs the
-#    command-line tools, a platform and build-tools — it does NOT install the
-#    NDK. Gradle therefore reaches configuration, cannot resolve the pinned NDK
-#    and stops. That is exactly the shape of a 5m45s failure: long enough to
-#    download Gradle 9.3.1 and compile the included build plugins, far too
-#    short to have compiled a line of native code.
-#
-# 2. ONE ARCHITECTURE. The template builds four ABIs. A Pixel is arm64-v8a, so
-#    the other three are dead weight — and native compilation is the long pole
-#    in this build. Building one ABI is roughly a quarter of the work.
-#
-# 3. THE LOG COMES BACK TO US. Every previous cycle ended with me guessing at a
-#    failure I could not read. Gradle's output is now teed to a file, the tail
-#    is written into the job summary — which is readable on the public run page
-#    without signing in — and the whole log is uploaded as an artifact. Win or
-#    lose, the next move is made from evidence.
+# It also publishes each build to a GitHub Release. A workflow artifact is a zip
+# behind a sign-in wall, which is wrong for putting an app on a phone and very
+# wrong for sixty pilot participants in October. A release asset is a plain URL
+# that a phone installs from in one tap.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write        # required to create the release
 
 jobs:
   build:
@@ -57,6 +50,8 @@ jobs:
       - uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------------ SDK
+      # setup-android installs the command-line tools, a platform and build-tools,
+      # but not the NDK — and Expo SDK 57 pins ndkVersion 27.1.12297006.
       - name: Install the NDK and CMake
         run: |
           set -euo pipefail
@@ -76,7 +71,6 @@ jobs:
             echo '```'
             java -version 2>&1
             echo "node   $(node -v)"
-            echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
             ls "$ANDROID_SDK_ROOT/ndk" 2>&1 || echo 'no ndk directory'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -104,14 +98,29 @@ jobs:
         working-directory: apps/mobile/android
         run: |
           set -o pipefail
-          ./gradlew assembleDebug \
+          ./gradlew assembleRelease \
             --no-daemon \
             --stacktrace \
             -PreactNativeArchitectures=arm64-v8a \
             -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g" \
             2>&1 | tee "$GITHUB_WORKSPACE/gradle.log"
 
-      # The part that ends the guessing. Runs whether Gradle won or lost.
+      # The APK is worthless if the JS never made it in. Fail loudly here rather
+      # than discovering it on the phone.
+      - name: Verify the bundle is inside the APK
+        working-directory: .
+        run: |
+          set -euo pipefail
+          APK=$(ls apps/mobile/android/app/build/outputs/apk/release/*.apk | head -1)
+          echo "APK: $APK  ($(du -h "$APK" | cut -f1))"
+          if unzip -l "$APK" | grep -qE "assets/index.android.bundle"; then
+            echo "JS bundle present — this APK runs standalone."
+          else
+            echo "::error::APK contains no JS bundle; it would fail to start on a device."
+            exit 1
+          fi
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+
       - name: Report what Gradle said
         if: always()
         working-directory: .
@@ -125,8 +134,6 @@ jobs:
             echo '```'
             tail -n 200 gradle.log
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          {
             echo '## Every line containing an error'
             echo '```'
             grep -nE "FAILURE|error:|ERROR|Caused by|What went wrong|Could not|Cannot|not found|No version" gradle.log | tail -n 80 || echo 'none'
@@ -141,9 +148,27 @@ jobs:
           path: gradle.log
           if-no-files-found: ignore
 
-      - name: Upload the APK
+      - name: Upload the APK as an artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: mettle-apk
-          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          path: apps/mobile/android/app/build/outputs/apk/release/*.apk
+
+      # ------------------------------------------------------- one-tap install
+      - name: Publish the APK as a release
+        if: success()
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OUT="mettle-v0.1-build${{ github.run_number }}.apk"
+          cp "$APK_PATH" "$OUT"
+          gh release create "build-${{ github.run_number }}" "$OUT" \
+            --title "Mettle v0.1 — build ${{ github.run_number }}" \
+            --notes "Android, arm64-v8a. Installs and runs standalone. Commit ${{ github.sha }}." \
+            --latest
+          URL="https://github.com/${{ github.repository }}/releases/latest"
+          echo "## Install it" >> "$GITHUB_STEP_SUMMARY"
+          echo "Open **$URL** on the phone and tap **$OUT**." >> "$GITHUB_STEP_SUMMARY"
